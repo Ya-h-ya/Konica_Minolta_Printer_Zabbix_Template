@@ -1,0 +1,1 @@
+# Konica_Minolta_Printer_Zabbix_Template
