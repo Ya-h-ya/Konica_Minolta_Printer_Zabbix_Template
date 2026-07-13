@@ -1,0 +1,295 @@
+zabbix_export:
+  version: '7.4'
+  template_groups:
+    - uuid: e09488db3fee4fd38f8832f7eb5f0aa5
+      name: 'Templates/Network devices'
+  templates:
+    - uuid: 4855de751b864891bf41d4dd987e5f4f
+      template: 'Konica Minolta Printer SNMP'
+      name: 'Konica Minolta Printer SNMP'
+      description: |
+        Monitors Konica Minolta (and most other) printers over standard
+        Printer MIB (RFC 3805) SNMP objects: printer status, toner/drum/colour
+        supply levels, paper tray levels, total page count, and active alerts.
+
+        Works with SNMPv1/v2c out of the box. Set the {$SNMP_COMMUNITY} macro
+        per host if it differs from "public". For SNMPv3, configure the SNMP
+        interface on the host as normal; the OIDs below are unaffected.
+
+        Tested against generic Printer MIB objects supported by Konica Minolta
+        bizhub devices. Some models may not populate every table (e.g. drum
+        units may not appear as a "marker supply" on all firmware).
+      groups:
+        - name: 'Templates/Network devices'
+      items:
+        - uuid: 9ff9d5a6b2c643aabc5f8c88bde8dfae
+          name: 'System description'
+          type: SNMP_AGENT
+          snmp_oid: '1.3.6.1.2.1.1.1.0'
+          key: system.descr
+          delay: 1h
+          history: 7d
+          trends: '0'
+          value_type: CHAR
+          description: 'Device sysDescr, useful to confirm model/firmware.'
+          tags:
+            - tag: component
+              value: general
+
+        - uuid: ddb4d8848ed54d11afa0ae1f4ea9873a
+          name: 'System uptime'
+          type: SNMP_AGENT
+          snmp_oid: '1.3.6.1.2.1.1.3.0'
+          key: system.uptime
+          delay: 3m
+          history: 7d
+          trends: 90d
+          units: uptime
+          preprocessing:
+            - type: MULTIPLIER
+              parameters:
+                - '0.01'
+          tags:
+            - tag: component
+              value: general
+          triggers:
+            - uuid: 9dd8b65c0f4042a7915c72ef28ce74ad
+              name: '{HOST.NAME}: has been restarted'
+              expression: 'last(/Konica Minolta Printer SNMP/system.uptime)<10m'
+              priority: WARNING
+              description: 'Uptime is less than 10 minutes, device was recently restarted.'
+              manual_close: 'YES'
+
+        - uuid: 73930b645c854a299835e6de80e9118c
+          name: 'Printer status'
+          type: SNMP_AGENT
+          snmp_oid: '1.3.6.1.2.1.25.3.5.1.1.1'
+          key: printer.status
+          delay: 1m
+          history: 7d
+          trends: '0'
+          value_type: UNSIGNED
+          description: |
+            hrPrinterStatus:
+            1=other, 2=unknown, 3=idle, 4=printing, 5=warmup
+          valuemap:
+            name: 'Printer status'
+          tags:
+            - tag: component
+              value: status
+          triggers:
+            - uuid: 430d0256f5e84c09ade7a0bf5c54c50b
+              name: '{HOST.NAME}: printer status is unknown/other'
+              expression: 'last(/Konica Minolta Printer SNMP/printer.status)=1 or last(/Konica Minolta Printer SNMP/printer.status)=2'
+              priority: AVERAGE
+              description: 'Printer is reporting an other/unknown status - may indicate an error condition.'
+
+        - uuid: bef64b75118a452ab84f8aa3e6d617fe
+          name: 'Total pages printed'
+          type: SNMP_AGENT
+          snmp_oid: '1.3.6.1.2.1.43.10.2.1.4.1.1'
+          key: printer.pagecount
+          delay: 15m
+          history: 7d
+          trends: 365d
+          value_type: UNSIGNED
+          description: 'prtMarkerLifeCount - lifetime page/impression counter.'
+          tags:
+            - tag: component
+              value: counters
+
+      discovery_rules:
+        - uuid: 37bb4e8bd6fd4c568675f4a662387ade
+          name: 'Supply levels discovery'
+          type: SNMP_AGENT
+          snmp_oid: 'discovery[{#SUPPLY_DESC},1.3.6.1.2.1.43.11.1.1.6,{#SUPPLY_MAXCAP},1.3.6.1.2.1.43.11.1.1.8,{#SUPPLY_CLASS},1.3.6.1.2.1.43.11.1.1.4]'
+          key: printer.supplies.discovery
+          delay: 1h
+          description: |
+            Discovers marker supplies from the Printer MIB (toner, drum,
+            waste toner box, etc.) via prtMarkerSuppliesTable.
+            {#SUPPLY_DESC} = human readable name (e.g. "Toner Cartridge - Black")
+            {#SUPPLY_CLASS} = 3 (supply that is consumed) or 4 (receptacle that fills up, e.g. waste toner)
+          item_prototypes:
+            - uuid: d36c873933344bcfba5754b2fe7ff74a
+              name: 'Supply level: {#SUPPLY_DESC}'
+              type: SNMP_AGENT
+              snmp_oid: '1.3.6.1.2.1.43.11.1.1.9.{#SNMPINDEX}'
+              key: 'printer.supply.level[{#SNMPINDEX}]'
+              delay: 15m
+              history: 30d
+              trends: 365d
+              value_type: FLOAT
+              units: '%'
+              description: |
+                prtMarkerSuppliesLevel. Note: if the corresponding
+                prtMarkerSuppliesMaxCapacity is -2, the level is already a
+                percentage (0-100). If it is a positive integer, the level is
+                a raw count out of that max value. Negative values are
+                special codes (see attached value map).
+              valuemap:
+                name: 'Printer level special codes'
+              preprocessing:
+                - type: JAVASCRIPT
+                  parameters:
+                    - |
+                      // If value is negative (e.g. -3 = "some remaining, unknown amount"
+                      // or -1 = "unknown"), pass through as-is so triggers relying on
+                      // >=0 comparisons don't misfire.
+                      return value;
+              tags:
+                - tag: component
+                  value: supplies
+                - tag: supply
+                  value: '{#SUPPLY_DESC}'
+              trigger_prototypes:
+                - uuid: 71e4f173d4164b05baff47eaae89bac0
+                  name: '{HOST.NAME}: {#SUPPLY_DESC} is low (<10%)'
+                  expression: 'last(/Konica Minolta Printer SNMP/printer.supply.level[{#SNMPINDEX}])<10 and last(/Konica Minolta Printer SNMP/printer.supply.level[{#SNMPINDEX}])>=0'
+                  priority: WARNING
+                  description: 'Supply level has dropped below 10%. Consider ordering a replacement.'
+                - uuid: f089a0b515fe4d75b91a840847bd844b
+                  name: '{HOST.NAME}: {#SUPPLY_DESC} is critically low (<3%)'
+                  expression: 'last(/Konica Minolta Printer SNMP/printer.supply.level[{#SNMPINDEX}])<3 and last(/Konica Minolta Printer SNMP/printer.supply.level[{#SNMPINDEX}])>=0'
+                  priority: HIGH
+                  description: 'Supply is nearly empty and needs replacing very soon.'
+
+        - uuid: 630b2cf565464575ac08eb49b2173afc
+          name: 'Paper tray discovery'
+          type: SNMP_AGENT
+          snmp_oid: 'discovery[{#TRAY_DESC},1.3.6.1.2.1.43.8.2.1.13,{#TRAY_MAXCAP},1.3.6.1.2.1.43.8.2.1.9]'
+          key: printer.trays.discovery
+          delay: 1h
+          description: 'Discovers paper input trays via prtInputTable.'
+          item_prototypes:
+            - uuid: a77e423ce2664a929f93da8fb6a2bcf6
+              name: 'Paper level: {#TRAY_DESC}'
+              type: SNMP_AGENT
+              snmp_oid: '1.3.6.1.2.1.43.8.2.1.10.{#SNMPINDEX}'
+              key: 'printer.tray.level[{#SNMPINDEX}]'
+              delay: 15m
+              history: 30d
+              trends: 365d
+              value_type: FLOAT
+              description: |
+                prtInputCurrentLevel. Units vary by tray (sheets or percent
+                depending on the device); check {#TRAY_MAXCAP} to interpret.
+                Negative values are special codes (see attached value map) -
+                common on small trays with no physical level sensor.
+              valuemap:
+                name: 'Printer level special codes'
+              tags:
+                - tag: component
+                  value: paper
+                - tag: tray
+                  value: '{#TRAY_DESC}'
+              trigger_prototypes:
+                - uuid: 9de4a71e2d65468caa4f74b436d2b23a
+                  name: '{HOST.NAME}: {#TRAY_DESC} is empty'
+                  expression: 'last(/Konica Minolta Printer SNMP/printer.tray.level[{#SNMPINDEX}])=0'
+                  priority: WARNING
+                  description: 'Paper tray is reporting empty.'
+
+            - uuid: 7c2e9f4a1b3d4e6089f0a1b2c3d4e5f6
+              name: 'Paper max capacity: {#TRAY_DESC}'
+              type: SNMP_AGENT
+              snmp_oid: '1.3.6.1.2.1.43.8.2.1.9.{#SNMPINDEX}'
+              key: 'printer.tray.maxcapacity[{#SNMPINDEX}]'
+              delay: 1h
+              history: 30d
+              trends: 365d
+              value_type: FLOAT
+              description: |
+                prtInputMaxCapacity - the tray's rated capacity. Compare this
+                against "Paper level: {#TRAY_DESC}" over time: if the two
+                values are always identical (even after removing paper),
+                this tray only detects paper present/absent, not a real
+                count, and the "current level" item can't be trusted for
+                anything except catching a fully empty tray.
+              valuemap:
+                name: 'Printer level special codes'
+              tags:
+                - tag: component
+                  value: paper
+                - tag: tray
+                  value: '{#TRAY_DESC}'
+
+        - uuid: c3958ae0b9a148e5904c335aed38e34e
+          name: 'Active alerts discovery'
+          type: SNMP_AGENT
+          snmp_oid: 'discovery[{#ALERT_DESC},1.3.6.1.2.1.43.18.1.1.8,{#ALERT_SEVERITY},1.3.6.1.2.1.43.18.1.1.2]'
+          key: printer.alerts.discovery
+          delay: 5m
+          description: |
+            Discovers entries in the Printer MIB alert table
+            (prtAlertTable) - covers things like "cover open", "paper jam",
+            "toner low", "waste toner box full", etc., independent of the
+            supply/tray tables above.
+          item_prototypes:
+            - uuid: db941253524b4e15827b27ede8dd6ce6
+              name: 'Alert: {#ALERT_DESC}'
+              type: SNMP_AGENT
+              snmp_oid: '1.3.6.1.2.1.43.18.1.1.2.{#SNMPINDEX}'
+              key: 'printer.alert.severity[{#SNMPINDEX}]'
+              delay: 5m
+              history: 7d
+              trends: '0'
+              value_type: UNSIGNED
+              description: |
+                prtAlertSeverity: 1=other, 3=critical, 4=warning.
+                The row only exists while the alert condition is active on
+                most devices, so "no data" generally means "no active alert".
+              valuemap:
+                name: 'Printer alert severity'
+              tags:
+                - tag: component
+                  value: alerts
+              trigger_prototypes:
+                - uuid: ffba5792ff91469cbe07ec5d580ce9f5
+                  name: '{HOST.NAME}: active printer alert - {#ALERT_DESC}'
+                  expression: 'last(/Konica Minolta Printer SNMP/printer.alert.severity[{#SNMPINDEX}])=3'
+                  priority: HIGH
+                  description: 'Printer is reporting a critical condition (e.g. jam, cover open, tray missing).'
+                - uuid: daf7aa5e74844048875308c3206a504c
+                  name: '{HOST.NAME}: printer warning - {#ALERT_DESC}'
+                  expression: 'last(/Konica Minolta Printer SNMP/printer.alert.severity[{#SNMPINDEX}])=4'
+                  priority: WARNING
+                  description: 'Printer is reporting a warning condition (e.g. supply low).'
+
+      macros:
+        - macro: '{$SNMP_COMMUNITY}'
+          value: public
+          description: 'SNMP v1/v2c community string for this printer.'
+
+      valuemaps:
+        - uuid: f3f8b500139e4dbd8660131c8dd267b8
+          name: 'Printer status'
+          mappings:
+            - value: '1'
+              newvalue: Other
+            - value: '2'
+              newvalue: Unknown
+            - value: '3'
+              newvalue: Idle
+            - value: '4'
+              newvalue: Printing
+            - value: '5'
+              newvalue: 'Warming up'
+        - uuid: 41c05aa2d2b049d9a227cdde4fecd9e6
+          name: 'Printer alert severity'
+          mappings:
+            - value: '1'
+              newvalue: Other
+            - value: '3'
+              newvalue: Critical
+            - value: '4'
+              newvalue: Warning
+        - uuid: 6a1f8c2d9e4b47a08d3e5f6017283945
+          name: 'Printer level special codes'
+          mappings:
+            - value: '-1'
+              newvalue: 'Unknown'
+            - value: '-2'
+              newvalue: 'At least one remains (exact amount unknown)'
+            - value: '-3'
+              newvalue: 'Not measurable (no level sensor on this tray/supply)'
